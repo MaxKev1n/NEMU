@@ -79,6 +79,15 @@ MemProfiler::MemProfiler()
     : CompressProfiler() {
     info = reinterpret_cast<MemInfo *>(inputBuf);
     bitMap = roaring_bitmap_create_with_capacity(CONFIG_MSIZE/64);
+    std::map<int64_t, int> vecGlobalMap;
+    globalStride.push_back(vecGlobalMap);
+    globalStride.push_back(vecGlobalMap);
+    std::map<vaddr_t, paddr_t> vecLocalMap;
+    localMap.push_back(vecLocalMap);
+    localMap.push_back(vecLocalMap);
+    std::map<vaddr_t, std::vector<std::pair<int64_t, int> > > veclocalStride;
+    localStride.push_back(veclocalStride);
+    localStride.push_back(veclocalStride);
 }
 
 void MemProfiler::compressProfile(vaddr_t pc, vaddr_t vaddr, paddr_t paddr) {
@@ -102,9 +111,93 @@ void MemProfiler::memProfile(vaddr_t pc, vaddr_t vaddr, paddr_t paddr) {
     roaring_bitmap_add(bitMap, paddr / CacheBlockSize);
 }
 
+void MemProfiler::globalStrideProfile(paddr_t paddr, paddr_t pre_addr, int mem_type){
+    int64_t stride = int64_t(paddr - pre_addr);
+    if (globalStride[mem_type].find(stride) == globalStride[mem_type].end()) {
+        globalStride[mem_type][stride] = 1;
+    } else {
+        globalStride[mem_type][stride] = globalStride[mem_type][stride] + 1;
+    }
+}
+
+void MemProfiler::localStrideProfile(vaddr_t pc, paddr_t paddr, int mem_type){
+    if (localMap[mem_type].find(pc) == localMap[mem_type].end()) {
+        localMap[mem_type][pc] = paddr;
+    } else {
+        paddr_t pre_addr = localMap[mem_type][pc];
+        localMap[mem_type][pc] = paddr;
+        int64_t stride = int64_t(paddr - pre_addr);
+        if (localStride[mem_type].find(pc) == localStride[mem_type].end()) {
+            std::vector<std::pair<int64_t, int> > vec;
+            vec.push_back(std::make_pair(stride, 1));
+            localStride[mem_type].insert(std::pair<vaddr_t, std::vector<std::pair<int64_t, int> > >(pc, vec));
+        } else {
+            for(std::vector<std::pair<int64_t, int> >::iterator iter = localStride[mem_type][pc].begin();iter != localStride[mem_type][pc].end();++iter){
+                if (iter->first == stride) {
+                    iter->second++;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+void MemProfiler::dumpStride(int bucketSize){
+    std::ofstream ofs;
+    ofs.open("strideHistogram.txt");
+    std::stringstream ss;
+
+    for(int mem_type = 0;mem_type < 2;mem_type++){
+        if (mem_type) {
+            ss << "global read stride:" << std::endl;
+        } else {
+            ss << "global write stride:" << std::endl;
+        }
+        for(std::map<int64_t, int>::iterator iter = globalStride[mem_type].begin();iter != globalStride[mem_type].end();++iter){
+            if (iter->first < 0) {
+                ss << std::hex << "-" << -iter->first << " " << std::oct << iter->second << std::endl;
+            } else {
+                ss << std::hex << iter->first << " " << std::oct << iter->second << std::endl;
+            }
+        }
+    }
+
+    for(int mem_type = 0;mem_type < 2;mem_type++){
+        if (mem_type) {
+            ss << "local read stride:" << std::endl;
+        } else {
+            ss << "local write stride:" << std::endl;
+        }
+        std::map<int64_t, int> local;
+        for(std::map<vaddr_t, std::vector<std::pair<int64_t, int> > >::iterator iter = localStride[mem_type].begin();iter != localStride[mem_type].end();++iter){
+            std::vector<std::pair<int64_t, int> > vec = iter->second;
+            for(std::vector<std::pair<int64_t, int> >::iterator iter1 = vec.begin();iter1 != vec.end();++iter1){
+                int64_t index = iter->first < 0 ? iter1->first / bucketSize - 1 : iter1->first / bucketSize;
+                if (local.find(index) == local.end()) {
+                    local[index] = iter1->second;
+                } else {
+                    local[index] = local[index] + iter1->second;
+                }
+            }
+        }
+        for(std::map<int64_t, int>::iterator iter = local.begin();iter != local.end();++iter){
+            if (iter->first >= 0) {
+                ss << std::hex << iter->first * bucketSize << "~" << (iter->first + 1) * bucketSize - 1 << " " << std::oct << iter->second << std::endl;
+            } else {
+                ss << std::hex << "-" << -iter->first * bucketSize << "~-" << (-iter->first - 1) * bucketSize + 1 << " " << std::oct << iter->second << std::endl;
+            }
+        }
+    }
+
+    ofs << ss.rdbuf();
+    ofs.close();
+}
+
 void MemProfiler::onExit() {
     uint32_t cardinality = roaring_bitmap_get_cardinality(bitMap);
     Log("Footprint: %u cacheblocks\n", cardinality);
+    Log("dump stride\n");
+    dumpStride(6);
 }
 
 ControlProfiler ctrlProfiler;
@@ -117,6 +210,14 @@ extern "C" {
 
 void control_profile(vaddr_t pc, vaddr_t target, bool taken) {
     BetaPointNS::ctrlProfiler.controlProfile(pc, target, taken);
+}
+
+void global_stride_profile(paddr_t paddr, paddr_t pre_addr, int mem_type){
+    BetaPointNS::memProfiler.globalStrideProfile(paddr, pre_addr, mem_type);
+}
+
+void local_stride_profile(vaddr_t pc, paddr_t paddr, int mem_type){
+    BetaPointNS::memProfiler.localStrideProfile(pc, paddr, mem_type);
 }
 
 void beta_on_exit() {

@@ -1,4 +1,9 @@
+#include <profiling/profiling_control.h>
 #include <isa.h>
+#include <profiling/betapoint-ext.h>
+
+paddr_t read_addr = 0;
+paddr_t write_addr = 0;
 
 #ifdef CONFIG_PERF_OPT
 #define ENABLE_HOSTTLB 1
@@ -106,8 +111,15 @@ static inline word_t vaddr_read_internal(void *s, vaddr_t addr, int len, int typ
     void recordFetch(uint64_t pc, uint64_t vaddr, uint64_t inst_paddr);
     if (s != NULL) { // mem read
       recordMem(((struct Decode *)s)->pc, addr, addr);
+      local_stride_profile(((struct Decode *)s)->pc, addr, 0);
     } else { // ifetch
       recordFetch(addr, addr, addr);
+    }
+    if (read_addr != 0) {
+      global_stride_profile(addr, read_addr, 0);
+      read_addr = addr;
+    } else {
+      read_addr = addr;
     }
     return paddr_read(addr, len, type, cpu.mode, addr);
   }
@@ -132,7 +144,17 @@ void vaddr_write(struct Decode *s, vaddr_t addr, int len, word_t data, int mmu_m
   isa_misalign_data_addr_check(addr, len, MEM_TYPE_WRITE);
 #endif
   if (unlikely(mmu_mode == MMU_DYNAMIC)) mmu_mode = isa_mmu_check(addr, len, MEM_TYPE_WRITE);
-  if (mmu_mode == MMU_DIRECT) { paddr_write(addr, len, data, cpu.mode, addr); return; }
+  if (mmu_mode == MMU_DIRECT) {
+    if (write_addr != 0) {
+      global_stride_profile(addr, write_addr, 1);
+      write_addr = addr;
+    } else {
+      write_addr = addr;
+    }
+    local_stride_profile(s->pc, addr, 1);
+    paddr_write(addr, len, data, cpu.mode, addr); 
+    return; 
+  }
 #ifndef __ICS_EXPORT
   MUXDEF(ENABLE_HOSTTLB, hosttlb_write, vaddr_mmu_write) (s, addr, len, data);
 #endif
